@@ -51,9 +51,12 @@ Envía un archivo de audio para obtener su transcripción.
 3.  **Configuración**:
     - **Runtime**: `Docker`.
     - **Plan**: `Free` (o el que prefieras).
-    - **Variable de Entorno**:
-      - `Key`: `PORT`
-      - `Value`: `10000`
+    - **Variables de Entorno**: Añade las siguientes variables para optimizar el servicio.
+      - `PORT`: `10000` (Render necesita saber en qué puerto escucha tu API).
+      - `PYTHONUNBUFFERED`: `1` (Permite ver los logs en tiempo real en la consola de Render).
+      - `PYTHONMALLOC`: `malloc` (Usa el asignador de memoria del sistema, más eficiente en contenedores).
+      - `OMP_THREAD_LIMIT`: `1` (Evita que Whisper sature la CPU compartida de Render).
+      - `MALLOC_TRIM_THRESHOLD_`: `100000` (Ayuda a devolver la memoria RAM al sistema más rápidamente).
 4.  **Desplegar**: Conecta tu repositorio y despliega.
 
 ## Ejecución Local (con Docker)
