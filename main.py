@@ -1,56 +1,88 @@
 import os
 import shutil
 import uuid
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import time
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from faster_whisper import WhisperModel
 
-app = FastAPI()
+app = FastAPI(title="Whisper Microservice - Render Optimized")
 
-# --- CONFIGURACIÓN DINÁMICA ---
-# Cambia esta variable en Render: WHISPER_MODEL = "base" o "small"
-MODEL_NAME = os.getenv("WHISPER_MODEL", "base") 
+# --- CARGA DE CONFIGURACIÓN ---
+# Usamos variables de entorno para que sea flexible sin tocar el código
+MODEL_NAME = os.getenv("WHISPER_MODEL", "tiny")
+THREADS = int(os.getenv("WHISPER_THREADS", 1))
+API_KEY_SECRET = os.getenv("API_KEY", "") # Opcional: para proteger tu API
 
-print(f"--- Cargando modelo: {MODEL_NAME} ---")
-# Usamos cpu_threads=1 para no asustar a Render
-model = WhisperModel(MODEL_NAME, device="cpu", compute_type="int8", cpu_threads=1)
+# --- INICIALIZACIÓN DEL MODELO ---
+# Lo cargamos una sola vez al arrancar el servicio
+print(f"--- Cargando modelo {MODEL_NAME} con {THREADS} hilos ---")
+model = WhisperModel(
+    MODEL_NAME, 
+    device="cpu", 
+    compute_type="int8", # Crítico para RAM
+    cpu_threads=THREADS,
+    num_workers=THREADS
+)
 
 @app.get("/")
 async def health():
-    # Retornamos estado y modelo para verificar cuál está cargado
-    return {"status": "online", "model": MODEL_NAME}
+    return {
+        "status": "online", 
+        "model": MODEL_NAME, 
+        "threads": THREADS,
+        "message": "Envíe POST a /transcribe"
+    }
 
 @app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
-    # Validación básica de extensión (opcional, pero recomendada)
-    if not file.filename.endswith(('.mp3', '.wav', '.m4a', '.ogg', '.oga')):
-        raise HTTPException(status_code=400, detail="Formato no soportado")
+async def transcribe(
+    file: UploadFile = File(...), 
+    x_api_key: str = Header(None)
+):
+    # 1. Seguridad básica (si configuraste API_KEY en Render)
+    if API_KEY_SECRET and x_api_key != API_KEY_SECRET:
+        raise HTTPException(status_code=403, detail="No autorizado")
 
-    temp_filename = f"{uuid.uuid4()}_{file.filename}"
+    # 2. Validar formatos (incluyendo .oga de Telegram)
+    if not file.filename.endswith(('.mp3', '.wav', '.m4a', '.ogg', '.oga')):
+        raise HTTPException(status_code=400, detail="Formato de audio no soportado")
+
+    temp_filename = f"temp_{uuid.uuid4()}_{file.filename}"
+    start_time = time.time()
+    
     try:
+        # 3. Guardar el audio temporalmente
         with open(temp_filename, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
-        # El initial_prompt ayuda a que el modelo no alucine con el contexto específico
-        prompt = "Transcripción de Jonathan Petersen: psicología, n8n, desarrollo web, cal.com, automatización, checklist."
-        
+        # 4. Transcripción con ajustes de velocidad máxima
+        # beam_size=1 es el modo 'Turbo'. Menos preciso pero mucho más rápido.
         segments, info = model.transcribe(
             temp_filename, 
-            beam_size=5, 
-            language="es",
-            initial_prompt=prompt
+            beam_size=1, 
+            language="es",         # Forzamos español para ahorrar CPU
+            vad_filter=True,       # Ignora silencios
+            vad_parameters=dict(min_silence_duration_ms=500)
         )
         
+        # Unimos los segmentos de texto
         text = " ".join([segment.text for segment in segments])
+        
+        processing_time = time.time() - start_time
+        print(f"--- Procesado en {processing_time:.2f}s | Audio: {info.duration:.2f}s ---")
+
         return {
-            "text": text.strip(), 
-            "model_used": MODEL_NAME, 
-            "duration": info.duration,
-            "language": info.language
+            "text": text.strip() if text.strip() else "[No se detectó voz]",
+            "language": info.language,
+            "duration": round(info.duration, 2),
+            "processing_time": round(processing_time, 2)
         }
+
     except Exception as e:
-        # En caso de error, devolvemos 500 para que n8n sepa que falló
+        print(f"Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+    
     finally:
+        # 5. Siempre limpiar el archivo temporal para no llenar el disco
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
 
