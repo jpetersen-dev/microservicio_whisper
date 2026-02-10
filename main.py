@@ -4,50 +4,51 @@ import uuid
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from faster_whisper import WhisperModel
 
-app = FastAPI(title="Whisper Microservice for n8n")
+app = FastAPI()
 
-# Mantenemos el modelo tiny pero optimizado
-model = WhisperModel("tiny", device="cpu", compute_type="int8")
+# --- CONFIGURACIÓN DINÁMICA ---
+# Cambia esta variable en Render: WHISPER_MODEL = "base" o "small"
+MODEL_NAME = os.getenv("WHISPER_MODEL", "base") 
+
+print(f"--- Cargando modelo: {MODEL_NAME} ---")
+# Usamos cpu_threads=1 para no asustar a Render
+model = WhisperModel(MODEL_NAME, device="cpu", compute_type="int8", cpu_threads=1)
 
 @app.get("/")
 async def health():
-    return {"status": "ok", "info": "Send a POST to /transcribe"}
+    # Retornamos estado y modelo para verificar cuál está cargado
+    return {"status": "online", "model": MODEL_NAME}
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
-    # 1. AÑADIMOS .oga a la lista de permitidos
+    # Validación básica de extensión (opcional, pero recomendada)
     if not file.filename.endswith(('.mp3', '.wav', '.m4a', '.ogg', '.oga')):
         raise HTTPException(status_code=400, detail="Formato no soportado")
 
     temp_filename = f"{uuid.uuid4()}_{file.filename}"
-    
     try:
         with open(temp_filename, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
-        # 2. MEJORAMOS LA LLAMADA A TRANSCRIBE
-        # Forzamos 'es' (español) y bajamos el umbral de silencio (vad_filter)
+        # El initial_prompt ayuda a que el modelo no alucine con el contexto específico
+        prompt = "Transcripción de Jonathan Petersen: psicología, n8n, desarrollo web, cal.com, automatización, checklist."
+        
         segments, info = model.transcribe(
             temp_filename, 
-            beam_size=3,              # Un poco más preciso que 1
-            language="es",            # Forzamos español para evitar que detecte 'en' o silencio
-            vad_filter=True,          # Limpia ruidos de fondo
-            vad_parameters=dict(min_silence_duration_ms=500)
+            beam_size=5, 
+            language="es",
+            initial_prompt=prompt
         )
         
         text = " ".join([segment.text for segment in segments])
-        
-        # Si el texto sigue vacío, devolvemos un aviso
-        if not text.strip():
-            return {"text": "[No se detectó habla clara]", "duration": info.duration, "debug": "audio_read_ok"}
-
         return {
-            "text": text.strip(),
-            "language": info.language,
-            "duration": info.duration
+            "text": text.strip(), 
+            "model_used": MODEL_NAME, 
+            "duration": info.duration,
+            "language": info.language
         }
     except Exception as e:
-        print(f"Error: {str(e)}") # Add logging for debugging
+        # En caso de error, devolvemos 500 para que n8n sepa que falló
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_filename):
